@@ -1,21 +1,38 @@
-# CineLog Android
+# CineLog
 
-这是 CineLog 的 Android 客户端与本地可部署后端工程。客户端仍保留离线模式，当前数据保存在应用私有 `SharedPreferences`；`backend/` 提供带认证、SQLite/PostgreSQL 数据库、用户隔离和 CRUD API 的服务端，方便先在本地运行，再部署到云主机。
+一个受豆瓣启发的本地观影记录 App：记录电影/剧集、评分、短评、标签和想看清单，并支持本机账号隔离、统计和可解释推荐。
 
-## 构建
+## 一键启动（本地全栈）
 
-需要 Android Studio、Android SDK 35 和 Gradle 8.7+。SDK 路径固定为 `F:\Android\sdk`（`local.properties`）。在本目录执行 `gradlew assembleDebug`（或用 Android Studio 打开项目），APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
+需要 Python 3.11+。在 `cine-log-android` 目录执行：
 
-当前 debug APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，并同步到工作区固定交付路径 `F:\桌面\lab2\CineLog-debug.apk`。每次版本更新后覆盖这两个位置。APK 包名为 `com.cinelog.app`；当前版本 `1.1`（versionCode 2），保留既有包名和调试签名，可覆盖安装并保留应用本地数据。界面适配系统状态栏/导航栏安全区，顶部添加按钮改为更宽的“＋ 添加”触控目标。当前客户端尚未接入后端 API，因此此版本的手机数据仍只存本地。
-
-## 本地后端
-
-后端代码在 `backend/`，默认生产容器使用 PostgreSQL。复制 `.env.example` 为 `.env`，设置长随机 `POSTGRES_PASSWORD` 和 `JWT_SECRET`，然后在工程根目录执行：
-
-```text
-docker compose up --build
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
+$env:PYTHONPATH = "backend"
+python -m uvicorn app.main:app --reload
 ```
 
-健康检查：`http://localhost:8000/health`。API 文档：`http://localhost:8000/docs`。开发时也可以直接使用 SQLite：`python -m uvicorn app.main:app --app-dir backend --reload`。
+打开 http://127.0.0.1:8000/ 。首次点击右下角设置图标，注册一个本地账号。数据默认写入 `backend/cinelog.db`，只保存在当前电脑；API 文档在 http://127.0.0.1:8000/docs 。
 
-后端已提供注册、登录、当前用户、作品增删改查、按类型/状态/关键词筛选、标签增删和健康检查。密码使用 PBKDF2，token 使用 HMAC 签名，并且所有作品/标签查询都按登录用户隔离。
+## 已实现功能
+
+- 电影/剧集日志、想看清单、评分、短评、日期和标签；
+- 本地注册/登录与用户数据隔离（PBKDF2 密码哈希、HMAC token）；
+- SQLite 默认存储，也保留 Docker + PostgreSQL 配置；
+- 作品和标签完整 CRUD，按类型、状态、标题/短评/标签搜索；
+- `/api/stats` 年度统计基础接口和 `/api/recommendations` 本地标签推荐接口；
+- 响应式网页端与 Android 客户端工程，共用同一套数据模型；
+- 后端自动托管网页，无需额外前端服务器。
+
+## 测试
+
+```powershell
+$env:PYTHONPATH = "backend"
+python -m pytest backend\tests -q
+```
+
+## Android
+
+`app/` 是离线优先的 Android 客户端，使用 Android Studio 或 `gradlew assembleDebug` 构建。`docker-compose.yml` 提供可选的 PostgreSQL 本地部署方式。

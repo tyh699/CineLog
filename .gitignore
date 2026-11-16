@@ -1,9 +1,20 @@
-.gradle/
-**/build/
-local.properties
-.env
-*.db
+# Python and local runtime data
 __pycache__/
-.venv/
+*.py[cod]
+.pytest_cache/
+*.db
+.env
+backend/.env
+
+# Android build output and machine-specific files
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+
+# Editors and OS files
 .idea/
-*.iml
+.vscode/
+.DS_Store
+Thumbs.db

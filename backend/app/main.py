@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Generator
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,6 +69,11 @@ Base.metadata.create_all(engine)
 app = FastAPI(title="CineLog API", version="1.0.0", description="Private, user-scoped CineLog API")
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "*").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
 bearer = HTTPBearer(auto_error=False)
+
+# The browser client is part of the same local app, so a single uvicorn
+# process provides both the API and the UI.  This keeps the default setup
+# entirely local and avoids a separate frontend server.
+STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
 
 
 def db_session() -> Generator[Session, None, None]:
@@ -160,6 +167,11 @@ class TagOut(TagIn):
     id: int
 
 
+class LibraryIn(BaseModel):
+    entries: list[EntryIn] = Field(default_factory=list, max_length=2000)
+    tags: list[TagIn] = Field(default_factory=list, max_length=300)
+
+
 def entry_out(entry: Entry) -> dict:
     return {"id": entry.id, "title": entry.title, "kind": entry.kind, "state": entry.state, "rating": entry.rating, "review": entry.review, "watched_date": entry.watched_date, "tags": json.loads(entry.tags), "created_at": entry.created_at, "updated_at": entry.updated_at}
 
@@ -167,6 +179,25 @@ def entry_out(entry: Entry) -> dict:
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "cinelog-api"}
+
+
+@app.get("/api/stats")
+def stats(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    items = db.scalars(select(Entry).where(Entry.owner_id == user.id)).all()
+    watched = [e for e in items if e.state == "WATCHED"]
+    rated = [e.rating for e in watched if e.rating]
+    return {"watched": len(watched), "wishlist": len(items) - len(watched), "average_rating": round(sum(rated) / len(rated), 1) if rated else None, "by_kind": {"MOVIE": sum(e.kind == "MOVIE" for e in watched), "SERIES": sum(e.kind == "SERIES" for e in watched)}}
+
+
+@app.get("/api/recommendations")
+def recommendations(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    """Small, explainable local recommendation feed: unseen items sharing tags with favourites."""
+    items = db.scalars(select(Entry).where(Entry.owner_id == user.id)).all()
+    watched = [e for e in items if e.state == "WATCHED"]
+    wishlist = [e for e in items if e.state == "WISHLIST"]
+    liked = {tag for e in watched if (e.rating or 0) >= 4 for tag in json.loads(e.tags)}
+    ranked = sorted(wishlist, key=lambda e: len(liked.intersection(json.loads(e.tags))), reverse=True)
+    return [{**entry_out(e), "reason": "与你喜欢的标签相似" if liked.intersection(json.loads(e.tags)) else "来自你的想看清单"} for e in ranked[:12]]
 
 
 @app.post("/api/auth/register", status_code=201)
@@ -205,6 +236,23 @@ def list_entries(kind: str | None = None, state: str | None = None, q: str | Non
         needle = q.casefold()
         items = [e for e in items if needle in e.title.casefold() or needle in e.review.casefold() or any(needle in t.casefold() for t in json.loads(e.tags))]
     return [entry_out(e) for e in items]
+
+
+@app.put("/api/library")
+def replace_library(data: LibraryIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    """Atomically save the current user's complete library from the single-device UI."""
+    entries = [Entry(owner_id=user.id, title=x.title.strip(), kind=x.kind, state=x.state, rating=x.rating if x.state == "WATCHED" else None, review=x.review if x.state == "WATCHED" else "", watched_date=x.watched_date if x.state == "WATCHED" else None, tags=json.dumps(x.tags, ensure_ascii=False)) for x in data.entries]
+    tags = [Tag(owner_id=user.id, name=x.name.strip(), for_movies=x.for_movies, for_series=x.for_series) for x in data.tags]
+    if any(not t.for_movies and not t.for_series for t in data.tags):
+        raise HTTPException(422, "Tag must apply to movies or series")
+    normalized = [t.name.casefold() for t in data.tags]
+    if len(set(normalized)) != len(normalized):
+        raise HTTPException(422, "Tag names must be unique")
+    db.query(Entry).filter(Entry.owner_id == user.id).delete(synchronize_session=False)
+    db.query(Tag).filter(Tag.owner_id == user.id).delete(synchronize_session=False)
+    db.add_all(entries + tags)
+    db.commit()
+    return {"entries": len(entries), "tags": len(tags)}
 
 
 @app.post("/api/entries", status_code=201)
@@ -247,3 +295,14 @@ def delete_tag(tag_id: int, user: User = Depends(current_user), db: Session = De
     tag=db.scalar(select(Tag).where(Tag.id==tag_id,Tag.owner_id==user.id))
     if tag is None: raise HTTPException(404,"Tag not found")
     db.delete(tag);db.commit()
+
+
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.get("/{path:path}")
+    def spa(path: str):
+        requested = os.path.abspath(os.path.join(STATIC_DIR, path))
+        if requested.startswith(STATIC_DIR) and os.path.isfile(requested):
+            return FileResponse(requested)
+        return FileResponse(os.path.join(STATIC_DIR, "index.html"))

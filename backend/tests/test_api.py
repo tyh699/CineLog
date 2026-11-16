@@ -42,4 +42,15 @@ def test_auth_and_user_scoped_data():
         assert client.get("/api/entries", headers=bob_headers).json() == []
         assert client.get("/api/tags", headers=bob_headers).json() == []
 
+        sync = client.put("/api/library", headers=alice, json={"entries": [
+            {"title": "Past Lives", "kind": "MOVIE", "state": "WATCHED", "rating": 5,
+             "review": "Tender", "watched_date": "2026-02-01", "tags": ["Drama"]},
+            {"title": "Severance", "kind": "SERIES", "state": "WISHLIST", "tags": ["Sci-fi"]}
+        ], "tags": [{"name": "Drama", "for_movies": True, "for_series": False}]})
+        assert sync.status_code == 200
+        assert sync.json() == {"entries": 2, "tags": 1}
+        assert client.get("/api/stats", headers=alice).json()["watched"] == 1
+        assert client.get("/api/recommendations", headers=alice).json()[0]["title"] == "Severance"
+        assert client.get("/", follow_redirects=True).status_code == 200
+
     Base.metadata.drop_all(engine)
