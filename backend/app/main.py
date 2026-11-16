@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, select, func, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -38,6 +38,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -66,6 +67,18 @@ class Tag(Base):
 
 
 Base.metadata.create_all(engine)
+# Small forward migration for existing local SQLite files.
+if "is_admin" not in {column["name"] for column in inspect(engine).get_columns("users")}:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
+# In this single-computer homework setup, promote the oldest existing account
+# once, so upgrading a database created before admin monitoring stays usable.
+with SessionLocal() as migration_db:
+    if migration_db.scalar(select(User.id).where(User.is_admin.is_(True)).limit(1)) is None:
+        first_id = migration_db.scalar(select(User.id).order_by(User.id).limit(1))
+        if first_id is not None:
+            migration_db.get(User, first_id).is_admin = True
+            migration_db.commit()
 app = FastAPI(title="CineLog API", version="1.0.0", description="Private, user-scoped CineLog API")
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "*").split(","), allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
 bearer = HTTPBearer(auto_error=False)
@@ -136,7 +149,7 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bear
 
 class CredentialsIn(BaseModel):
     username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
-    password: str = Field(min_length=10, max_length=128)
+    password: str = Field(min_length=6, max_length=128)
 
 
 class EntryIn(BaseModel):
@@ -204,9 +217,10 @@ def recommendations(user: User = Depends(current_user), db: Session = Depends(db
 def register(data: CredentialsIn, db: Session = Depends(db_session)):
     if db.scalar(select(User).where(User.username == data.username)):
         raise HTTPException(status_code=409, detail="Username already exists")
-    user = User(username=data.username, password_hash=password_digest(data.password))
+    first_account = db.scalar(select(func.count()).select_from(User)) == 0
+    user = User(username=data.username, password_hash=password_digest(data.password), is_admin=first_account)
     db.add(user); db.commit(); db.refresh(user)
-    return {"access_token": create_token(user.id), "token_type": "bearer", "username": user.username}
+    return {"access_token": create_token(user.id), "token_type": "bearer", "username": user.username, "is_admin": user.is_admin}
 
 
 @app.post("/api/auth/login")
@@ -214,12 +228,39 @@ def login(data: CredentialsIn, db: Session = Depends(db_session)):
     user = db.scalar(select(User).where(User.username == data.username))
     if user is None or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-    return {"access_token": create_token(user.id), "token_type": "bearer", "username": user.username}
+    return {"access_token": create_token(user.id), "token_type": "bearer", "username": user.username, "is_admin": user.is_admin}
 
 
 @app.get("/api/me")
 def me(user: User = Depends(current_user)):
-    return {"id": user.id, "username": user.username}
+    return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
+
+
+@app.get("/api/admin/overview")
+def admin_overview(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    users = db.scalars(select(User).order_by(User.created_at)).all()
+    user_rows = []
+    for account in users:
+        count = db.scalar(select(func.count()).select_from(Entry).where(Entry.owner_id == account.id)) or 0
+        user_rows.append({"username": account.username, "is_admin": account.is_admin, "created_at": account.created_at, "entry_count": count})
+    recent = db.execute(select(Entry, User.username).join(User, Entry.owner_id == User.id).order_by(Entry.updated_at.desc()).limit(12)).all()
+    recent_rows = [{"username": owner, "title": entry.title, "kind": entry.kind, "state": entry.state, "updated_at": entry.updated_at} for entry, owner in recent]
+    return {
+        "service": "ok",
+        "database": "SQLite" if DATABASE_URL.startswith("sqlite") else "SQL database",
+        "counts": {
+            "users": len(users),
+            "entries": db.scalar(select(func.count()).select_from(Entry)) or 0,
+            "tags": db.scalar(select(func.count()).select_from(Tag)) or 0,
+            "movies": db.scalar(select(func.count()).select_from(Entry).where(Entry.kind == "MOVIE")) or 0,
+            "series": db.scalar(select(func.count()).select_from(Entry).where(Entry.kind == "SERIES")) or 0,
+            "wishlist": db.scalar(select(func.count()).select_from(Entry).where(Entry.state == "WISHLIST")) or 0,
+        },
+        "users_detail": user_rows,
+        "recent_activity": recent_rows,
+    }
 
 
 @app.get("/api/entries")
@@ -299,6 +340,10 @@ def delete_tag(tag_id: int, user: User = Depends(current_user), db: Session = De
 
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.get("/admin")
+    def admin_page():
+        return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
 
     @app.get("/{path:path}")
     def spa(path: str):

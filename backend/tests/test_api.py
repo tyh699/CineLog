@@ -17,6 +17,9 @@ def test_auth_and_user_scoped_data():
         register = client.post("/api/auth/register", json={"username": "alice", "password": "correct-horse-123"})
         assert register.status_code == 201
         alice = {"Authorization": f"Bearer {register.json()['access_token']}"}
+        assert register.json()["is_admin"] is True
+        assert client.get("/api/me", headers=alice).json()["is_admin"] is True
+        assert client.get("/api/admin/overview", headers=alice).status_code == 200
 
         created = client.post("/api/entries", headers=alice, json={
             "title": "Arrival", "kind": "MOVIE", "state": "WATCHED", "rating": 5,
@@ -39,6 +42,10 @@ def test_auth_and_user_scoped_data():
 
         bob = client.post("/api/auth/register", json={"username": "bob", "password": "another-password-456"})
         bob_headers = {"Authorization": f"Bearer {bob.json()['access_token']}"}
+        assert bob.json()["is_admin"] is False
+        assert client.get("/api/admin/overview", headers=bob_headers).status_code == 403
+        assert client.post("/api/auth/register", json={"username": "short", "password": "12345"}).status_code == 422
+        assert client.post("/api/auth/register", json={"username": "short", "password": "123456"}).status_code == 201
         assert client.get("/api/entries", headers=bob_headers).json() == []
         assert client.get("/api/tags", headers=bob_headers).json() == []
 
@@ -52,5 +59,6 @@ def test_auth_and_user_scoped_data():
         assert client.get("/api/stats", headers=alice).json()["watched"] == 1
         assert client.get("/api/recommendations", headers=alice).json()[0]["title"] == "Severance"
         assert client.get("/", follow_redirects=True).status_code == 200
+        assert client.get("/admin").status_code == 200
 
     Base.metadata.drop_all(engine)
