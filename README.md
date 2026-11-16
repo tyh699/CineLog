@@ -35,4 +35,10 @@ python -m pytest backend\tests -q
 
 ## Android
 
-`app/` 是离线优先的 Android 客户端，使用 Android Studio 或 `gradlew assembleDebug` 构建。`docker-compose.yml` 提供可选的 PostgreSQL 本地部署方式。
+`app/` 现在支持本地数据库连接：打开 App 顶部“连接”，登录/注册后会把片单同步到 FastAPI。默认 Android 模拟器地址是 `http://10.0.2.2:8000`；真机和电脑在同一 Wi-Fi 时，用电脑局域网 IP 构建：
+
+```powershell
+.\gradlew.bat clean assembleDebug -PAPI_BASE_URL=http://192.168.1.100:8000
+```
+
+把 `192.168.1.100` 换成电脑实际局域网 IP，并允许 Windows 防火墙放行 8000 端口。APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，仓库外的同步交付副本位于 `F:\桌面\lab2\CineLog-debug.apk`。`docker-compose.yml` 提供可选的 PostgreSQL 本地部署方式。

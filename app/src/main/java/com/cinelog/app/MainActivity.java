@@ -20,6 +20,12 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int BG = Color.rgb(16,20,17), SURFACE = Color.rgb(23,29,25), SURFACE2 = Color.rgb(31,40,33);
@@ -32,12 +38,14 @@ public class MainActivity extends Activity {
     private EditText searchField;
     private int page = 0;
     private String query = "";
+    private String apiToken = "";
+    private final java.util.concurrent.ExecutorService network = Executors.newSingleThreadExecutor();
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setStatusBarColor(BG); getWindow().setNavigationBarColor(BG);
         if(Build.VERSION.SDK_INT>=30) getWindow().setDecorFitsSystemWindows(false);
-        prefs = getSharedPreferences("cinelog", MODE_PRIVATE); load(); buildShell(); render();
+        prefs = getSharedPreferences("cinelog", MODE_PRIVATE); apiToken=prefs.getString("api_token",""); load(); buildShell(); render();
     }
 
     private int dp(float v) { return (int)(v * getResources().getDisplayMetrics().density + .5f); }
@@ -70,8 +78,29 @@ public class MainActivity extends Activity {
             JSONArray a=new JSONArray(); for(Entry e:entries)a.put(e.toJson());
             JSONArray ts=new JSONArray();for(Tag t:tags)ts.put(t.toJson());
             prefs.edit().putString("entries",a.toString()).putString("tags",ts.toString()).apply();
+            if(!apiToken.isEmpty()) syncToServer();
         } catch(Exception ignored) { }
     }
+    private JSONObject request(String method,String path,JSONObject body) throws Exception {
+        HttpURLConnection c=(HttpURLConnection)new URL(BuildConfig.API_BASE_URL+path).openConnection();
+        c.setRequestMethod(method);c.setConnectTimeout(8000);c.setReadTimeout(12000);c.setRequestProperty("Accept","application/json");
+        if(!apiToken.isEmpty())c.setRequestProperty("Authorization","Bearer "+apiToken);
+        if(body!=null){c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json; charset=utf-8");try(OutputStream out=c.getOutputStream()){out.write(body.toString().getBytes("UTF-8"));}}
+        int code=c.getResponseCode();java.io.InputStream input=code<400?c.getInputStream():c.getErrorStream();StringBuilder text=new StringBuilder();
+        if(input!=null)try(BufferedReader reader=new BufferedReader(new InputStreamReader(input,"UTF-8"))){String line;while((line=reader.readLine())!=null)text.append(line);}
+        c.disconnect();if(code<200||code>=300)throw new Exception(text.length()>0?text.toString():"HTTP "+code);
+        return text.length()==0?new JSONObject():new JSONObject(text.toString());
+    }
+    private JSONArray requestArray(String path) throws Exception {
+        HttpURLConnection c=(HttpURLConnection)new URL(BuildConfig.API_BASE_URL+path).openConnection();c.setConnectTimeout(8000);c.setReadTimeout(12000);c.setRequestProperty("Authorization","Bearer "+apiToken);
+        int code=c.getResponseCode();java.io.InputStream input=code<400?c.getInputStream():c.getErrorStream();StringBuilder text=new StringBuilder();if(input!=null)try(BufferedReader reader=new BufferedReader(new InputStreamReader(input,"UTF-8"))){String line;while((line=reader.readLine())!=null)text.append(line);}c.disconnect();if(code<200||code>=300)throw new Exception(text.toString());return new JSONArray(text.toString());
+    }
+    private JSONObject libraryPayload() throws Exception {JSONObject root=new JSONObject();JSONArray a=new JSONArray(),ts=new JSONArray();for(Entry e:entries)a.put(e.toJson());for(Tag t:tags){JSONObject o=new JSONObject();o.put("name",t.name);o.put("for_movies",t.movie);o.put("for_series",t.series);ts.put(o);}root.put("entries",a);root.put("tags",ts);return root;}
+    private void syncToServer(){network.execute(()->{try{request("PUT","/api/library",libraryPayload());runOnUiThread(()->toast("已同步到本机数据库"));}catch(Exception e){runOnUiThread(()->toast("同步失败：请确认电脑后端正在运行"));}});}
+    private void loadFromServer(){network.execute(()->{try{JSONArray remoteEntries=requestArray("/api/entries"),remoteTags=requestArray("/api/tags");ArrayList<Entry> nextEntries=new ArrayList<>();ArrayList<Tag> nextTags=new ArrayList<>();for(int i=0;i<remoteEntries.length();i++)nextEntries.add(Entry.from(remoteEntries.getJSONObject(i)));for(int i=0;i<remoteTags.length();i++){JSONObject t=remoteTags.getJSONObject(i);nextTags.add(new Tag(t.optString("name"),t.optBoolean("for_movies",true),t.optBoolean("for_series",true)));}entries.clear();entries.addAll(nextEntries);tags.clear();tags.addAll(nextTags);storeLocal();runOnUiThread(()->{render();toast("已从本地数据库载入片单");});}catch(Exception e){runOnUiThread(()->toast("载入失败：请检查账号和本机后端"));}});}
+    private void storeLocal(){try{JSONArray a=new JSONArray();for(Entry e:entries)a.put(e.toJson());JSONArray ts=new JSONArray();for(Tag t:tags)ts.put(t.toJson());prefs.edit().putString("entries",a.toString()).putString("tags",ts.toString()).apply();}catch(Exception ignored){}}
+    private void showLoginDialog(){LinearLayout box=column();box.setPadding(dp(20),0,dp(20),0);EditText username=input("用户名（至少 3 位）"),password=input("密码（至少 10 位）");password.setInputType(129);field(box,"本地账号",username);field(box,"密码",password);TextView hint=label("后端地址："+BuildConfig.API_BASE_URL,10,MUTED,false);hint.setPadding(0,dp(10),0,0);box.addView(hint);AlertDialog dialog=new AlertDialog.Builder(this).setTitle("连接本地数据库").setView(box).setNegativeButton("取消",null).setNeutralButton("注册",null).setPositiveButton("登录",null).create();dialog.setOnShowListener(v->{dialog.getButton(-1).setOnClickListener(b->authenticate(username.getText().toString().trim(),password.getText().toString(),false));dialog.getButton(-3).setOnClickListener(b->authenticate(username.getText().toString().trim(),password.getText().toString(),true));});dialog.show();}
+    private void authenticate(String username,String password,boolean register){if(username.length()<3||password.length()<10){toast("用户名至少 3 位，密码至少 10 位");return;}network.execute(()->{try{JSONObject credentials=new JSONObject();credentials.put("username",username);credentials.put("password",password);JSONObject result=request("POST",register?"/api/auth/register":"/api/auth/login",credentials);apiToken=result.getString("access_token");prefs.edit().putString("api_token",apiToken).putString("username",username).apply();if(register){syncToServer();runOnUiThread(()->{render();toast("本地账号已创建，片单将同步到电脑");});}else loadFromServer();}catch(Exception e){runOnUiThread(()->toast(register?"注册失败：用户名可能已存在":"登录失败：请检查账号密码或电脑后端"));}});}
     private void buildShell() {
         root=column(); root.setBackgroundColor(BG);
         root.setOnApplyWindowInsetsListener((v,insets)->{
@@ -88,8 +117,9 @@ public class MainActivity extends Activity {
         LinearLayout top=row(); top.setPadding(dp(20),dp(10),dp(18),dp(8)); top.setBackgroundColor(BG);
         LinearLayout brand=column(); TextView logo=label("CineLog",21,TEXT,true); TextView subtitle=label("YOUR SCREEN JOURNAL",9,MUTED,true); brand.addView(logo); brand.addView(subtitle);
         top.addView(brand,new LinearLayout.LayoutParams(0,dp(48),1));
+        TextView connect=label(apiToken.isEmpty()?"连接":"已连接",12,apiToken.isEmpty()?TEXT:LIME,true); connect.setGravity(Gravity.CENTER); connect.setBackground(shape(SURFACE2,15,LINE)); LinearLayout.LayoutParams connectLp=lp(72,48); connectLp.leftMargin=dp(8); top.addView(connect,connectLp); connect.setContentDescription("连接本地数据库"); connect.setOnClickListener(v->showLoginDialog());
         TextView add=label("＋ 添加",13,BG,true); add.setGravity(Gravity.CENTER); add.setBackground(shape(LIME,15,0));
-        LinearLayout.LayoutParams addLp=lp(92,48); addLp.leftMargin=dp(10); top.addView(add,addLp); add.setContentDescription("添加作品"); add.setOnClickListener(v->showEntryDialog(null));
+        LinearLayout.LayoutParams addLp=lp(82,48); addLp.leftMargin=dp(8); top.addView(add,addLp); add.setContentDescription("添加作品"); add.setOnClickListener(v->showEntryDialog(null));
         root.addView(top,lp(-1,68));
         scroll=new ScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         content=column(); content.setPadding(dp(20),dp(10),dp(20),dp(24)); scroll.addView(content);
@@ -168,5 +198,5 @@ public class MainActivity extends Activity {
     private String today(){return new SimpleDateFormat("yyyy-MM-dd",Locale.CHINA).format(new Date());}
     private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_SHORT).show();}
     private static class Tag {String name;boolean movie,series;Tag(String n,boolean m,boolean s){name=n;movie=m;series=s;}JSONObject toJson()throws Exception{JSONObject o=new JSONObject();o.put("name",name);o.put("movie",movie);o.put("series",series);return o;}}
-    private static class Entry {String title="",review="",tags="",date="";boolean series,wishlist;int rating;JSONObject toJson()throws Exception{JSONObject o=new JSONObject();o.put("title",title);o.put("review",review);o.put("tags",tags);o.put("date",date);o.put("series",series);o.put("wishlist",wishlist);o.put("rating",rating);return o;}static Entry from(JSONObject o){Entry e=new Entry();e.title=o.optString("title");e.review=o.optString("review");e.tags=o.optString("tags");e.date=o.optString("date");e.series=o.optBoolean("series");e.wishlist=o.optBoolean("wishlist");e.rating=o.optInt("rating");return e;}}
+    private static class Entry {String title="",review="",tags="",date="";boolean series,wishlist;int rating;JSONObject toJson()throws Exception{JSONObject o=new JSONObject();o.put("title",title);o.put("review",review);o.put("tags",new JSONArray());JSONArray tagArray=o.getJSONArray("tags");for(String t:tags.split("[,，]"))if(!t.trim().isEmpty())tagArray.put(t.trim());o.put("watched_date",date.isEmpty()?JSONObject.NULL:date);o.put("kind",series?"SERIES":"MOVIE");o.put("state",wishlist?"WISHLIST":"WATCHED");o.put("rating",rating);return o;}static Entry from(JSONObject o){Entry e=new Entry();e.title=o.optString("title");e.review=o.optString("review");e.date=o.has("watched_date")?o.optString("watched_date"):o.optString("date");e.series="SERIES".equals(o.optString("kind"))||o.optBoolean("series");e.wishlist="WISHLIST".equals(o.optString("state"))||o.optBoolean("wishlist");e.rating=o.optInt("rating");if(o.has("tags")&&o.opt("tags") instanceof JSONArray){JSONArray a=o.optJSONArray("tags");StringBuilder b=new StringBuilder();for(int i=0;i<a.length();i++){if(i>0)b.append(", ");b.append(a.optString(i));}e.tags=b.toString();}else e.tags=o.optString("tags");return e;}}
 }
