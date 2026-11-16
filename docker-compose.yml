@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cinelog
+      POSTGRES_USER: cinelog
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - cinelog-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinelog -d cinelog"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: postgresql+psycopg://cinelog:${POSTGRES_PASSWORD}@db:5432/cinelog
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      TOKEN_HOURS: ${TOKEN_HOURS:-168}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  cinelog-db:
