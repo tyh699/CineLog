@@ -35,10 +35,10 @@ python -m pytest backend\tests -q
 
 ## Android
 
-`app/` 现在支持本地数据库连接：打开 App 顶部“连接”，登录/注册后会把片单同步到 FastAPI。默认 Android 模拟器地址是 `http://10.0.2.2:8000`；真机和电脑在同一 Wi-Fi 时，用电脑局域网 IP 构建：
+`app/` 是账号优先的正常 App：首次打开直接注册/登录，登录后进入首页；本地使用 SQLite 保存会话、作品、标签和多对多标签关系，并自动同步到 FastAPI。默认 Android 模拟器地址是 `http://10.0.2.2:8000`；真机和电脑在同一 Wi-Fi 时，用电脑局域网 IP 构建：
 
 ```powershell
 .\gradlew.bat clean assembleDebug -PAPI_BASE_URL=http://192.168.1.100:8000
 ```
 
-把 `192.168.1.100` 换成电脑实际局域网 IP，并允许 Windows 防火墙放行 8000 端口。APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，仓库外的同步交付副本位于 `F:\桌面\lab2\CineLog-debug.apk`。`docker-compose.yml` 提供可选的 PostgreSQL 本地部署方式。
+把 `192.168.1.100` 换成电脑实际局域网 IP，并允许 Windows 防火墙放行 8000 端口。当前 Android 版本为 `1.3`，APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，仓库外的同步交付副本位于 `F:\桌面\lab2\CineLog-debug.apk`。`docker-compose.yml` 提供可选的 PostgreSQL 本地部署方式。
