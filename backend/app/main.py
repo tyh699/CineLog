@@ -21,6 +21,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./cinelog.db")
+TMDB_API_READ_TOKEN = os.getenv("TMDB_API_READ_TOKEN", "").strip()
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 TOKEN_HOURS = int(os.getenv("TOKEN_HOURS", "168"))
 if len(JWT_SECRET) < 32:
@@ -213,10 +214,34 @@ CATALOG = [
     ("series-dark", "暗黑", "SERIES", "2017", ["科幻", "悬疑"]), ("series-fleabag", "伦敦生活", "SERIES", "2016", ["喜剧", "成长"]),
     ("movie-arrival-en", "Arrival", "MOVIE", "2016", ["科幻", "治愈"]), ("movie-past-lives-en", "Past Lives", "MOVIE", "2023", ["爱情", "成长"]),
 ]
+TMDB_CACHE: dict[str, dict] = {}
 
 
 def catalog_items():
     return [{"catalog_id": cid, "title": title, "kind": kind, "year": year, "tags": tags} for cid, title, kind, year, tags in CATALOG]
+
+
+def tmdb_search(query: str, kind: str) -> list[dict]:
+    if not TMDB_API_READ_TOKEN:
+        return []
+    endpoint = "movie" if kind == "MOVIE" else "tv"
+    url = "https://api.themoviedb.org/3/search/" + endpoint + "?language=zh-CN&include_adult=false&query=" + urllib.parse.quote(query)
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {TMDB_API_READ_TOKEN}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+    results = []
+    for item in payload.get("results", [])[:8]:
+        title = item.get("title") if kind == "MOVIE" else item.get("name")
+        date = item.get("release_date") if kind == "MOVIE" else item.get("first_air_date")
+        if not title:
+            continue
+        canonical = {"catalog_id": f"tmdb-{kind.lower()}-{item.get('id')}", "title": title, "kind": kind, "year": (date or "")[:4], "tags": [], "source": "TMDB", "poster_path": item.get("poster_path") or ""}
+        TMDB_CACHE[canonical["catalog_id"]] = canonical
+        results.append(canonical)
+    return results
 
 
 def entry_out(entry: Entry) -> dict:
@@ -224,7 +249,7 @@ def entry_out(entry: Entry) -> dict:
 
 
 def canonical_entry(data: EntryIn) -> tuple[str, str, list[str], str]:
-    match = next((item for item in catalog_items() if (data.catalog_id and item["catalog_id"] == data.catalog_id and item["kind"] == data.kind) or (not data.catalog_id and item["title"].casefold() == data.title.strip().casefold() and item["kind"] == data.kind)), None)
+    match = next((item for item in catalog_items() + list(TMDB_CACHE.values()) if (data.catalog_id and item["catalog_id"] == data.catalog_id and item["kind"] == data.kind) or (not data.catalog_id and item["title"].casefold() == data.title.strip().casefold() and item["kind"] == data.kind)), None)
     if match is None:
         raise HTTPException(422, "Please choose a title from catalog search")
     return match["catalog_id"], match["title"], match["tags"], match["year"]
@@ -268,7 +293,10 @@ def catalog_search(q: str = "", kind: str = "MOVIE", user: User = Depends(curren
     needle = q.strip().casefold()
     if len(needle) < 2 or kind not in {"MOVIE", "SERIES"}:
         return []
-    return [item for item in catalog_items() if item["kind"] == kind and needle in item["title"].casefold()][:8]
+    local = [item for item in catalog_items() if item["kind"] == kind and needle in item["title"].casefold()]
+    remote = tmdb_search(q.strip(), kind)
+    seen = {item["title"].casefold() for item in local}
+    return local + [item for item in remote if item["title"].casefold() not in seen]
 
 
 @app.post("/api/auth/register", status_code=201)

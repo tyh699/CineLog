@@ -66,6 +66,7 @@ def test_auth_and_user_scoped_data():
         assert recs[0]["catalog_id"] != bob_recs[0]["catalog_id"]
         assert client.get("/api/catalog/search?q=星际&kind=MOVIE", headers=alice).json()[0]["title"] == "星际穿越"
         assert client.get("/api/catalog/search?q=1&kind=MOVIE", headers=alice).json() == []
+        assert client.get("/api/catalog/search?q=Arrival&kind=MOVIE", headers=alice).json()[0]["catalog_id"] == "movie-arrival-en"
         assert client.get("/", follow_redirects=True).status_code == 200
         assert client.get("/admin").status_code == 200
 

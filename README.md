@@ -14,6 +14,14 @@ $env:PYTHONPATH = "backend"
 python -m uvicorn app.main:app --reload
 ```
 
+如需启用 TMDB 在线搜索，在本机后端启动前设置 TMDB API Read Access Token（不要写入 APK、Git 或聊天）：
+
+```powershell
+$env:TMDB_API_READ_TOKEN = "你的 TMDB Read Access Token"
+```
+
+未设置 Token 时仍使用内置本地目录；设置后，作品搜索会合并 TMDB 的电影/剧集结果。TMDB 结果经后端代理返回，手机端不保存 Token。
+
 打开 http://127.0.0.1:8000/ 。首次打开直接注册/登录本地账号，密码至少 6 位。第一个注册账号会自动成为管理员；管理员监测页在 http://127.0.0.1:8000/admin 。数据默认写入项目目录下的 `cinelog.db`，只保存在当前电脑；卸载手机 App 或退出登录都不会删除服务端数据。API 文档在 http://127.0.0.1:8000/docs 。
 
 ## 已实现功能
@@ -24,6 +32,7 @@ python -m uvicorn app.main:app --reload
 - 作品和标签完整 CRUD，按类型、状态、标题/短评/标签搜索；
 - `/api/stats` 年度统计基础接口和 `/api/recommendations` 本地标签推荐接口；
 - `/api/catalog/search` 本地标准作品目录搜索；新增/编辑作品必须选择目录结果，不能保存任意的 `1` 等文本；
+- `/api/catalog/search` 在配置 `TMDB_API_READ_TOKEN` 后会优先合并 TMDB 在线搜索，并保留本地目录兜底；
 - `/api/admin/overview` 管理员监测接口与 `/admin` 管理后台；
 - 响应式网页端与 Android 客户端工程，共用同一套数据模型；
 - 后端自动托管网页，无需额外前端服务器。
