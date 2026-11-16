@@ -3,7 +3,7 @@ plugins { id 'com.android.application' }
 android { namespace 'com.cinelog.app'; compileSdk 35
     buildFeatures { buildConfig true }
     defaultConfig {
-        applicationId 'com.cinelog.app'; minSdk 23; targetSdk 35; versionCode 3; versionName '1.2'
+        applicationId 'com.cinelog.app'; minSdk 23; targetSdk 35; versionCode 4; versionName '1.3'
         buildConfigField 'String', 'API_BASE_URL', '"' + (project.findProperty('API_BASE_URL') ?: 'http://10.0.2.2:8000') + '"'
     }
 }

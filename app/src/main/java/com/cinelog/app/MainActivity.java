@@ -33,19 +33,23 @@ public class MainActivity extends Activity {
     private final ArrayList<Entry> entries = new ArrayList<>();
     private final ArrayList<Tag> tags = new ArrayList<>();
     private android.content.SharedPreferences prefs;
+    private LocalDatabase localDb;
     private LinearLayout root, content, nav;
     private ScrollView scroll;
     private EditText searchField;
     private int page = 0;
     private String query = "";
     private String apiToken = "";
+    private String username = "";
+    private String apiBaseUrl = "";
     private final java.util.concurrent.ExecutorService network = Executors.newSingleThreadExecutor();
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setStatusBarColor(BG); getWindow().setNavigationBarColor(BG);
         if(Build.VERSION.SDK_INT>=30) getWindow().setDecorFitsSystemWindows(false);
-        prefs = getSharedPreferences("cinelog", MODE_PRIVATE); apiToken=prefs.getString("api_token",""); load(); buildShell(); render();
+        prefs = getSharedPreferences("cinelog", MODE_PRIVATE); localDb=new LocalDatabase(this); apiToken=prefs.getString("api_token",""); username=prefs.getString("username",""); apiBaseUrl=prefs.getString("server_url",BuildConfig.API_BASE_URL); load();
+        if(apiToken.isEmpty()) showAuthScreen(); else {buildShell();render();loadFromServer();}
     }
 
     private int dp(float v) { return (int)(v * getResources().getDisplayMetrics().density + .5f); }
@@ -61,7 +65,7 @@ public class MainActivity extends Activity {
     private LinearLayout row() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.HORIZONTAL); l.setGravity(Gravity.CENTER_VERTICAL); return l; }
     private LinearLayout.LayoutParams lp(int w,int h) { return new LinearLayout.LayoutParams(w < 0 ? w : dp(w), h < 0 ? h : dp(h)); }
     private void load() {
-        try {
+        if(localDb.getState("legacy_imported").isEmpty()) try {
             JSONArray a = new JSONArray(prefs.getString("entries", "[]"));
             for(int i=0;i<a.length();i++) entries.add(Entry.from(a.getJSONObject(i)));
             JSONArray ts = new JSONArray(prefs.getString("tags", "[]"));
@@ -71,18 +75,18 @@ public class MainActivity extends Activity {
                 if(item instanceof JSONObject) {JSONObject o=(JSONObject)item; tags.add(new Tag(o.optString("name"),o.optBoolean("movie",true),o.optBoolean("series",true)));}
                 else tags.add(new Tag(String.valueOf(item),true,true));
             }
+            localDb.saveLibrary(entries,tags);localDb.putState("legacy_imported","yes");
         } catch(Exception ignored) { }
+        else localDb.loadLibrary(entries,tags);
     }
     private void save() {
         try {
-            JSONArray a=new JSONArray(); for(Entry e:entries)a.put(e.toJson());
-            JSONArray ts=new JSONArray();for(Tag t:tags)ts.put(t.toJson());
-            prefs.edit().putString("entries",a.toString()).putString("tags",ts.toString()).apply();
+            storeLocal();
             if(!apiToken.isEmpty()) syncToServer();
         } catch(Exception ignored) { }
     }
     private JSONObject request(String method,String path,JSONObject body) throws Exception {
-        HttpURLConnection c=(HttpURLConnection)new URL(BuildConfig.API_BASE_URL+path).openConnection();
+        HttpURLConnection c=(HttpURLConnection)new URL(apiBaseUrl+path).openConnection();
         c.setRequestMethod(method);c.setConnectTimeout(8000);c.setReadTimeout(12000);c.setRequestProperty("Accept","application/json");
         if(!apiToken.isEmpty())c.setRequestProperty("Authorization","Bearer "+apiToken);
         if(body!=null){c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json; charset=utf-8");try(OutputStream out=c.getOutputStream()){out.write(body.toString().getBytes("UTF-8"));}}
@@ -92,15 +96,16 @@ public class MainActivity extends Activity {
         return text.length()==0?new JSONObject():new JSONObject(text.toString());
     }
     private JSONArray requestArray(String path) throws Exception {
-        HttpURLConnection c=(HttpURLConnection)new URL(BuildConfig.API_BASE_URL+path).openConnection();c.setConnectTimeout(8000);c.setReadTimeout(12000);c.setRequestProperty("Authorization","Bearer "+apiToken);
+        HttpURLConnection c=(HttpURLConnection)new URL(apiBaseUrl+path).openConnection();c.setConnectTimeout(8000);c.setReadTimeout(12000);c.setRequestProperty("Authorization","Bearer "+apiToken);
         int code=c.getResponseCode();java.io.InputStream input=code<400?c.getInputStream():c.getErrorStream();StringBuilder text=new StringBuilder();if(input!=null)try(BufferedReader reader=new BufferedReader(new InputStreamReader(input,"UTF-8"))){String line;while((line=reader.readLine())!=null)text.append(line);}c.disconnect();if(code<200||code>=300)throw new Exception(text.toString());return new JSONArray(text.toString());
     }
     private JSONObject libraryPayload() throws Exception {JSONObject root=new JSONObject();JSONArray a=new JSONArray(),ts=new JSONArray();for(Entry e:entries)a.put(e.toJson());for(Tag t:tags){JSONObject o=new JSONObject();o.put("name",t.name);o.put("for_movies",t.movie);o.put("for_series",t.series);ts.put(o);}root.put("entries",a);root.put("tags",ts);return root;}
-    private void syncToServer(){network.execute(()->{try{request("PUT","/api/library",libraryPayload());runOnUiThread(()->toast("已同步到本机数据库"));}catch(Exception e){runOnUiThread(()->toast("同步失败：请确认电脑后端正在运行"));}});}
+    private void syncToServer(){network.execute(()->{try{request("PUT","/api/library",libraryPayload());}catch(Exception e){runOnUiThread(()->toast("暂未同步，请检查 CineLog 服务"));}});}
     private void loadFromServer(){network.execute(()->{try{JSONArray remoteEntries=requestArray("/api/entries"),remoteTags=requestArray("/api/tags");ArrayList<Entry> nextEntries=new ArrayList<>();ArrayList<Tag> nextTags=new ArrayList<>();for(int i=0;i<remoteEntries.length();i++)nextEntries.add(Entry.from(remoteEntries.getJSONObject(i)));for(int i=0;i<remoteTags.length();i++){JSONObject t=remoteTags.getJSONObject(i);nextTags.add(new Tag(t.optString("name"),t.optBoolean("for_movies",true),t.optBoolean("for_series",true)));}entries.clear();entries.addAll(nextEntries);tags.clear();tags.addAll(nextTags);storeLocal();runOnUiThread(()->{render();toast("已从本地数据库载入片单");});}catch(Exception e){runOnUiThread(()->toast("载入失败：请检查账号和本机后端"));}});}
-    private void storeLocal(){try{JSONArray a=new JSONArray();for(Entry e:entries)a.put(e.toJson());JSONArray ts=new JSONArray();for(Tag t:tags)ts.put(t.toJson());prefs.edit().putString("entries",a.toString()).putString("tags",ts.toString()).apply();}catch(Exception ignored){}}
-    private void showLoginDialog(){LinearLayout box=column();box.setPadding(dp(20),0,dp(20),0);EditText username=input("用户名（至少 3 位）"),password=input("密码（至少 10 位）");password.setInputType(129);field(box,"本地账号",username);field(box,"密码",password);TextView hint=label("后端地址："+BuildConfig.API_BASE_URL,10,MUTED,false);hint.setPadding(0,dp(10),0,0);box.addView(hint);AlertDialog dialog=new AlertDialog.Builder(this).setTitle("连接本地数据库").setView(box).setNegativeButton("取消",null).setNeutralButton("注册",null).setPositiveButton("登录",null).create();dialog.setOnShowListener(v->{dialog.getButton(-1).setOnClickListener(b->authenticate(username.getText().toString().trim(),password.getText().toString(),false));dialog.getButton(-3).setOnClickListener(b->authenticate(username.getText().toString().trim(),password.getText().toString(),true));});dialog.show();}
-    private void authenticate(String username,String password,boolean register){if(username.length()<3||password.length()<10){toast("用户名至少 3 位，密码至少 10 位");return;}network.execute(()->{try{JSONObject credentials=new JSONObject();credentials.put("username",username);credentials.put("password",password);JSONObject result=request("POST",register?"/api/auth/register":"/api/auth/login",credentials);apiToken=result.getString("access_token");prefs.edit().putString("api_token",apiToken).putString("username",username).apply();if(register){syncToServer();runOnUiThread(()->{render();toast("本地账号已创建，片单将同步到电脑");});}else loadFromServer();}catch(Exception e){runOnUiThread(()->toast(register?"注册失败：用户名可能已存在":"登录失败：请检查账号密码或电脑后端"));}});}
+    private void storeLocal(){localDb.saveLibrary(entries,tags);}
+    private void showAuthScreen(){root=column();root.setBackgroundColor(BG);root.setPadding(dp(26),dp(38),dp(26),dp(24));setContentView(root);TextView logo=label("CineLog",30,TEXT,true);root.addView(logo);TextView title=label("把喜欢的故事，\n收进自己的片单。",25,TEXT,true);title.setPadding(0,dp(30),0,dp(8));root.addView(title);TextView subtitle=label("登录或创建账号，记录电影、剧集与观影心情。",13,MUTED,false);root.addView(subtitle);EditText userField=input("用户名（至少 3 位）"),passwordField=input("密码（至少 10 位）"),serverField=input("例如 http://10.0.2.2:8000");passwordField.setInputType(129);serverField.setSingleLine(true);userField.setSingleLine(true);passwordField.setSingleLine(true);field(root,"用户名",userField);field(root,"密码",passwordField);field(root,"服务器地址",serverField);serverField.setText(apiBaseUrl);TextView help=label("模拟器默认 10.0.2.2；真机请使用电脑的局域网 IP，并确保电脑上的 CineLog 服务已启动。",10,MUTED,false);help.setPadding(0,dp(6),0,dp(14));root.addView(help);TextView login=label("登录",13,BG,true);login.setGravity(Gravity.CENTER);login.setBackground(shape(LIME,11,0));root.addView(login,lp(-1,48));LinearLayout.LayoutParams rp=lp(-1,46);rp.topMargin=dp(9);TextView register=label("创建新账号",12,LIME,true);register.setGravity(Gravity.CENTER);register.setBackground(shape(SURFACE2,11,LINE));root.addView(register,rp);login.setOnClickListener(v->authenticate(userField.getText().toString().trim(),passwordField.getText().toString(),serverField.getText().toString().trim(),false));register.setOnClickListener(v->authenticate(userField.getText().toString().trim(),passwordField.getText().toString(),serverField.getText().toString().trim(),true));}
+    private void authenticate(String account,String password,String server,boolean register){if(account.length()<3||password.length()<10){toast("用户名至少 3 位，密码至少 10 位");return;}if(!server.startsWith("http://")&&!server.startsWith("https://")){toast("服务器地址需要以 http:// 或 https:// 开头");return;}apiBaseUrl=server.endsWith("/")?server.substring(0,server.length()-1):server;network.execute(()->{try{JSONObject credentials=new JSONObject();credentials.put("username",account);credentials.put("password",password);JSONObject result=request("POST",register?"/api/auth/register":"/api/auth/login",credentials);apiToken=result.getString("access_token");username=account;prefs.edit().putString("api_token",apiToken).putString("username",username).putString("server_url",apiBaseUrl).apply();if(register){request("PUT","/api/library",libraryPayload());runOnUiThread(()->{buildShell();render();toast("欢迎加入 CineLog");});}else{loadFromServerNow();runOnUiThread(()->{buildShell();render();toast("欢迎回来，"+username);});}}catch(Exception e){runOnUiThread(()->toast(register?"注册失败，请检查服务地址或用户名":"登录失败，请检查服务地址、账号和密码"));}});}
+    private void loadFromServerNow() throws Exception {JSONArray remoteEntries=requestArray("/api/entries"),remoteTags=requestArray("/api/tags");ArrayList<Entry> nextEntries=new ArrayList<>();ArrayList<Tag> nextTags=new ArrayList<>();for(int i=0;i<remoteEntries.length();i++)nextEntries.add(Entry.from(remoteEntries.getJSONObject(i)));for(int i=0;i<remoteTags.length();i++){JSONObject t=remoteTags.getJSONObject(i);nextTags.add(new Tag(t.optString("name"),t.optBoolean("for_movies",true),t.optBoolean("for_series",true)));}entries.clear();entries.addAll(nextEntries);tags.clear();tags.addAll(nextTags);storeLocal();}
     private void buildShell() {
         root=column(); root.setBackgroundColor(BG);
         root.setOnApplyWindowInsetsListener((v,insets)->{
@@ -117,9 +122,9 @@ public class MainActivity extends Activity {
         LinearLayout top=row(); top.setPadding(dp(20),dp(10),dp(18),dp(8)); top.setBackgroundColor(BG);
         LinearLayout brand=column(); TextView logo=label("CineLog",21,TEXT,true); TextView subtitle=label("YOUR SCREEN JOURNAL",9,MUTED,true); brand.addView(logo); brand.addView(subtitle);
         top.addView(brand,new LinearLayout.LayoutParams(0,dp(48),1));
-        TextView connect=label(apiToken.isEmpty()?"连接":"已连接",12,apiToken.isEmpty()?TEXT:LIME,true); connect.setGravity(Gravity.CENTER); connect.setBackground(shape(SURFACE2,15,LINE)); LinearLayout.LayoutParams connectLp=lp(72,48); connectLp.leftMargin=dp(8); top.addView(connect,connectLp); connect.setContentDescription("连接本地数据库"); connect.setOnClickListener(v->showLoginDialog());
+        TextView account=label(username.isEmpty()?"我":username.substring(0,Math.min(2,username.length())),11,LIME,true);account.setGravity(Gravity.CENTER);account.setBackground(shape(SURFACE2,22,LINE));LinearLayout.LayoutParams accountLp=lp(42,42);accountLp.leftMargin=dp(7);top.addView(account,accountLp);account.setContentDescription("个人账号");account.setOnClickListener(v->showAccountMenu());
         TextView add=label("＋ 添加",13,BG,true); add.setGravity(Gravity.CENTER); add.setBackground(shape(LIME,15,0));
-        LinearLayout.LayoutParams addLp=lp(82,48); addLp.leftMargin=dp(8); top.addView(add,addLp); add.setContentDescription("添加作品"); add.setOnClickListener(v->showEntryDialog(null));
+        LinearLayout.LayoutParams addLp=lp(78,46); addLp.leftMargin=dp(7); top.addView(add,addLp); add.setContentDescription("添加作品"); add.setOnClickListener(v->showEntryDialog(null));
         root.addView(top,lp(-1,68));
         scroll=new ScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         content=column(); content.setPadding(dp(20),dp(10),dp(20),dp(24)); scroll.addView(content);
@@ -127,12 +132,12 @@ public class MainActivity extends Activity {
         buildNav();
     }
     private void buildNav() {
-        nav.removeAllViews(); String[] icons={"⌂","▣","▤","♡","⌗"}; String[] names={"总览","电影","剧集","想看","标签"};
+        nav.removeAllViews(); String[] icons={"⌂","✦","▣","▤","♡","☷"}; String[] names={"首页","发现","电影","剧集","想看","片单"};
         for(int i=0;i<names.length;i++) { final int idx=i; LinearLayout item=column(); item.setGravity(Gravity.CENTER); TextView icon=label(icons[i],20,page==i?LIME:MUTED,true); icon.setGravity(Gravity.CENTER); TextView name=label(names[i],10,page==i?LIME:MUTED,page==i); name.setGravity(Gravity.CENTER); item.addView(icon); item.addView(name); nav.addView(item,new LinearLayout.LayoutParams(0,-1,1)); item.setContentDescription(names[i]); item.setOnClickListener(v->{page=idx;query="";render();}); }
     }
     private void render() {
         if(content==null)return; content.removeAllViews(); buildNav();
-        if(page==0) renderHome(); else if(page==4) renderTags(); else renderLibrary();
+        if(page==0) renderHome(); else if(page==1) renderDiscover(); else if(page==5) renderTags(); else renderLibrary();
     }
     private void renderHome() {
         TextView kicker=label("YOUR PERSONAL SCREEN JOURNAL",9,LIME,true); kicker.setLetterSpacing(.12f); content.addView(kicker,lp(-1,18));
@@ -140,23 +145,23 @@ public class MainActivity extends Activity {
         TextView intro=label("记录每一次观看，也记下下一部想看的作品。",13,MUTED,false); intro.setPadding(0,dp(7),0,dp(18)); content.addView(intro);
         LinearLayout hero=column(); hero.setPadding(dp(18),dp(18),dp(18),dp(18)); hero.setBackground(shape(SURFACE2,18,LINE));
         hero.addView(label("A LITTLE MORE CINEMA",9,LIME,true)); TextView heroTitle=label("好故事，值得留下痕迹。",19,TEXT,true); heroTitle.setPadding(0,dp(11),0,dp(6)); hero.addView(heroTitle);
-        hero.addView(label("电影、剧集、评分、短评和标签，都保存在这台设备。",12,MUTED,false));
+        hero.addView(label("记录电影与剧集，写下短评，整理自己的观影片单。登录后会自动同步到你的 CineLog 账号。",12,MUTED,false));
         TextView cta=label("＋ 记录一部作品",12,BG,true); cta.setGravity(Gravity.CENTER); cta.setBackground(shape(LIME,10,0)); LinearLayout.LayoutParams cp=lp(152,42);cp.topMargin=dp(16);hero.addView(cta,cp);cta.setOnClickListener(v->showEntryDialog(null));
         LinearLayout.LayoutParams hp=lp(-1,-2);hp.topMargin=dp(4);hp.bottomMargin=dp(16);content.addView(hero,hp);
         int watched=0,wishlist=0;double score=0;int rated=0;for(Entry e:entries){if(e.wishlist)wishlist++;else{watched++;if(e.rating>0){score+=e.rating;rated++;}}}
         LinearLayout stats=row();stats.addView(stat("已看作品",String.valueOf(watched)),new LinearLayout.LayoutParams(0,dp(82),1));
         View gap=new View(this);stats.addView(gap,lp(9,1));stats.addView(stat("想看清单",String.valueOf(wishlist)),new LinearLayout.LayoutParams(0,dp(82),1));
         View gap2=new View(this);stats.addView(gap2,lp(9,1));stats.addView(stat("平均评分",rated==0?"—":String.format(Locale.CHINA,"%.1f",score/rated)),new LinearLayout.LayoutParams(0,dp(82),1));content.addView(stats);
-        LinearLayout section=row();section.setPadding(0,dp(22),0,dp(10));section.addView(label("最近记录",17,TEXT,true),new LinearLayout.LayoutParams(0,-2,1));TextView all=label("查看全部  →",11,LIME,true);section.addView(all);all.setOnClickListener(v->{page=1;render();});content.addView(section);
+        LinearLayout section=row();section.setPadding(0,dp(22),0,dp(10));section.addView(label("最近记录",17,TEXT,true),new LinearLayout.LayoutParams(0,-2,1));TextView all=label("查看全部  →",11,LIME,true);section.addView(all);all.setOnClickListener(v->{page=2;render();});content.addView(section);
         ArrayList<Entry> recents=new ArrayList<>();for(Entry e:entries)if(!e.wishlist)recents.add(e);
         if(recents.isEmpty())content.addView(empty("还没有观影记录","添加第一部作品，开始建立你的片单。"));else for(int i=0;i<Math.min(3,recents.size());i++)content.addView(entryCard(recents.get(i)));
     }
     private View stat(String title,String value) {LinearLayout box=column();box.setPadding(dp(11),dp(12),dp(8),dp(8));box.setBackground(shape(SURFACE,13,LINE));box.addView(label(title,10,MUTED,false));TextView n=label(value,22,LIME,true);n.setPadding(0,dp(7),0,0);box.addView(n);return box;}
     private void renderLibrary() {
-        String title=page==1?"电影日志":page==2?"剧集日志":"想看清单";
+        String title=page==2?"电影日志":page==3?"剧集日志":"想看清单";
         TextView kicker=label("CINELOG LIBRARY",9,LIME,true);kicker.setLetterSpacing(.13f);content.addView(kicker);
         TextView h=label(title,27,TEXT,true);h.setPadding(0,dp(6),0,dp(4));content.addView(h);
-        content.addView(label(page==3?"把感兴趣的电影和剧集先收进清单。":"整理作品记录，留下每一次观影感受。",12,MUTED,false));
+        content.addView(label(page==4?"把感兴趣的电影和剧集先收进清单。":"整理作品记录，留下每一次观影感受。",12,MUTED,false));
         searchField=new EditText(this);searchField.setSingleLine(true);searchField.setTextSize(13);searchField.setTextColor(TEXT);searchField.setHintTextColor(MUTED);searchField.setHint("⌕  搜索片名、短评或标签");searchField.setPadding(dp(14),0,dp(14),0);searchField.setBackground(shape(SURFACE,11,LINE));LinearLayout.LayoutParams sp=lp(-1,46);sp.topMargin=dp(17);sp.bottomMargin=dp(12);content.addView(searchField,sp);
         LinearLayout filters=row();filters.setGravity(Gravity.CENTER_VERTICAL);String[] fs={"全部","已看","想看"};for(int i=0;i<fs.length;i++){final String f=fs[i];TextView chip=label(f,10,TEXT,true);chip.setGravity(Gravity.CENTER);chip.setPadding(dp(14),0,dp(14),0);chip.setBackground(shape(SURFACE2,30,LINE));LinearLayout.LayoutParams fl=lp(-2,34);fl.rightMargin=dp(7);filters.addView(chip,fl);chip.setOnClickListener(v->{renderFiltered(f);});}content.addView(filters);
         LinearLayout list=column();list.setTag("entry-list");LinearLayout.LayoutParams listp=lp(-1,-2);listp.topMargin=dp(13);content.addView(list,listp);fillEntries(list,"全部");
@@ -164,7 +169,9 @@ public class MainActivity extends Activity {
         TextView add=label("＋  添加条目",13,BG,true);add.setGravity(Gravity.CENTER);add.setBackground(shape(LIME,12,0));LinearLayout.LayoutParams ap=lp(-1,48);ap.topMargin=dp(17);content.addView(add,ap);add.setOnClickListener(v->showEntryDialog(null));
     }
     private void renderFiltered(String filter){View v=content.findViewWithTag("entry-list");if(v instanceof LinearLayout)fillEntries((LinearLayout)v,filter);}
-    private void fillEntries(LinearLayout list,String filter){list.removeAllViews();int count=0;for(Entry e:entries){if(page==1&&(e.series||e.wishlist))continue;if(page==2&&(!e.series||e.wishlist))continue;if(page==3&&!e.wishlist)continue;if(filter.equals("已看")&&e.wishlist)continue;if(filter.equals("想看")&&!e.wishlist)continue;String hay=(e.title+" "+e.review+" "+e.tags).toLowerCase(Locale.ROOT);if(!query.isEmpty()&&!hay.contains(query.toLowerCase(Locale.ROOT)))continue;list.addView(entryCard(e));count++;}if(count==0)list.addView(empty("没有找到作品","调整搜索条件，或添加一条新记录。"));}
+    private void fillEntries(LinearLayout list,String filter){list.removeAllViews();int count=0;for(Entry e:entries){if(page==2&&(e.series||e.wishlist))continue;if(page==3&&(!e.series||e.wishlist))continue;if(page==4&&!e.wishlist)continue;if(filter.equals("已看")&&e.wishlist)continue;if(filter.equals("想看")&&!e.wishlist)continue;String hay=(e.title+" "+e.review+" "+e.tags).toLowerCase(Locale.ROOT);if(!query.isEmpty()&&!hay.contains(query.toLowerCase(Locale.ROOT)))continue;list.addView(entryCard(e));count++;}if(count==0)list.addView(empty("没有找到作品","调整搜索条件，或添加一条新记录。"));}
+    private void renderDiscover(){TextView k=label("DISCOVER",9,LIME,true);content.addView(k);TextView h=label("发现好作品",27,TEXT,true);h.setPadding(0,dp(6),0,dp(4));content.addView(h);content.addView(label("从豆瓣式的编辑精选开始，遇到喜欢的先加入想看。",12,MUTED,false));String[][] picks={{"花样年华","电影 · 2000","爱情 / 经典"},{"千与千寻","电影 · 2001","动画 / 成长"},{"海街日记","电影 · 2015","家庭 / 治愈"},{"漫长的季节","剧集 · 2023","悬疑 / 国产"}};for(String[] p:picks){LinearLayout card=row();card.setPadding(dp(13),dp(13),dp(13),dp(13));card.setBackground(shape(SURFACE,14,LINE));LinearLayout info=column();info.addView(label(p[0],15,TEXT,true));info.addView(label(p[1],10,MUTED,false));info.addView(label(p[2],10,LIME,false));card.addView(info,new LinearLayout.LayoutParams(0,-2,1));TextView add=label("＋ 想看",11,BG,true);add.setGravity(Gravity.CENTER);add.setBackground(shape(LIME,10,0));card.addView(add,lp(70,38));add.setOnClickListener(v->{Entry e=new Entry();e.id=java.util.UUID.randomUUID().toString();e.title=p[0];e.series=p[1].startsWith("剧集");e.wishlist=true;e.tags=p[2].replace(" / ",", ");entries.add(0,e);registerInlineTags(e.tags);save();toast("已加入想看清单");});LinearLayout.LayoutParams cp=lp(-1,-2);cp.bottomMargin=dp(10);content.addView(card,cp);}}
+    private void showAccountMenu(){new AlertDialog.Builder(this).setTitle(username).setItems(new String[]{"刷新片单","退出登录"},(d,which)->{if(which==0)loadFromServer();else{apiToken="";username="";prefs.edit().remove("api_token").remove("username").apply();entries.clear();tags.clear();storeLocal();showAuthScreen();}}).setNegativeButton("关闭",null).show();}
     private View entryCard(Entry e){LinearLayout card=row();card.setGravity(Gravity.TOP);card.setPadding(dp(11),dp(11),dp(11),dp(11));card.setBackground(shape(SURFACE,14,LINE));LinearLayout.LayoutParams outer=lp(-1,-2);outer.bottomMargin=dp(10);card.setLayoutParams(outer);
         LinearLayout poster=column();poster.setGravity(Gravity.CENTER);poster.setBackground(shape(e.series?Color.rgb(58,79,82):Color.rgb(94,67,54),10,0));TextView initials=label(shortTitle(e.title),16,TEXT,true);initials.setGravity(Gravity.CENTER);poster.addView(initials);card.addView(poster,lp(68,96));
         LinearLayout info=column();info.setPadding(dp(12),dp(1),0,0);card.addView(info,new LinearLayout.LayoutParams(0,-2,1));
@@ -197,6 +204,6 @@ public class MainActivity extends Activity {
     private void showTagDialog(){LinearLayout box=column();box.setPadding(dp(20),0,dp(20),0);EditText name=input("标签名称");field(box,"标签名称",name);CheckBox movie=new CheckBox(this);movie.setText("适用于电影");movie.setTextColor(TEXT);movie.setButtonTintList(ColorStateList.valueOf(LIME));CheckBox series=new CheckBox(this);series.setText("适用于剧集");series.setTextColor(TEXT);series.setChecked(true);series.setButtonTintList(ColorStateList.valueOf(LIME));movie.setChecked(true);box.addView(movie);box.addView(series);new AlertDialog.Builder(this).setTitle("创建标签").setView(box).setNegativeButton("取消",null).setPositiveButton("保存",(d,w)->{String n=name.getText().toString().trim();if(n.isEmpty()){toast("请输入标签名称");return;}if(!movie.isChecked()&&!series.isChecked()){toast("至少选择一种作品类型");return;}if(findTag(n)!=null){toast("标签已存在");return;}tags.add(new Tag(n,movie.isChecked(),series.isChecked()));save();render();}).show();}
     private String today(){return new SimpleDateFormat("yyyy-MM-dd",Locale.CHINA).format(new Date());}
     private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_SHORT).show();}
-    private static class Tag {String name;boolean movie,series;Tag(String n,boolean m,boolean s){name=n;movie=m;series=s;}JSONObject toJson()throws Exception{JSONObject o=new JSONObject();o.put("name",name);o.put("movie",movie);o.put("series",series);return o;}}
-    private static class Entry {String title="",review="",tags="",date="";boolean series,wishlist;int rating;JSONObject toJson()throws Exception{JSONObject o=new JSONObject();o.put("title",title);o.put("review",review);o.put("tags",new JSONArray());JSONArray tagArray=o.getJSONArray("tags");for(String t:tags.split("[,，]"))if(!t.trim().isEmpty())tagArray.put(t.trim());o.put("watched_date",date.isEmpty()?JSONObject.NULL:date);o.put("kind",series?"SERIES":"MOVIE");o.put("state",wishlist?"WISHLIST":"WATCHED");o.put("rating",rating);return o;}static Entry from(JSONObject o){Entry e=new Entry();e.title=o.optString("title");e.review=o.optString("review");e.date=o.has("watched_date")?o.optString("watched_date"):o.optString("date");e.series="SERIES".equals(o.optString("kind"))||o.optBoolean("series");e.wishlist="WISHLIST".equals(o.optString("state"))||o.optBoolean("wishlist");e.rating=o.optInt("rating");if(o.has("tags")&&o.opt("tags") instanceof JSONArray){JSONArray a=o.optJSONArray("tags");StringBuilder b=new StringBuilder();for(int i=0;i<a.length();i++){if(i>0)b.append(", ");b.append(a.optString(i));}e.tags=b.toString();}else e.tags=o.optString("tags");return e;}}
+    static class Tag {String name;boolean movie,series;Tag(String n,boolean m,boolean s){name=n;movie=m;series=s;}JSONObject toJson()throws Exception{JSONObject o=new JSONObject();o.put("name",name);o.put("movie",movie);o.put("series",series);return o;}}
+    static class Entry {String id="",title="",review="",tags="",date="",year="";boolean series,wishlist;int rating;String[] tagNames(){return tags.split("[,，]");}JSONObject toJson()throws Exception{JSONObject o=new JSONObject();o.put("title",title);o.put("review",review);o.put("tags",new JSONArray());JSONArray tagArray=o.getJSONArray("tags");for(String t:tags.split("[,，]"))if(!t.trim().isEmpty())tagArray.put(t.trim());o.put("watched_date",date.isEmpty()?JSONObject.NULL:date);o.put("kind",series?"SERIES":"MOVIE");o.put("state",wishlist?"WISHLIST":"WATCHED");o.put("rating",rating);return o;}static Entry from(JSONObject o){Entry e=new Entry();e.id=o.optString("id",java.util.UUID.randomUUID().toString());e.title=o.optString("title");e.review=o.optString("review");e.date=o.has("watched_date")?o.optString("watched_date"):o.optString("date");e.series="SERIES".equals(o.optString("kind"))||o.optBoolean("series");e.wishlist="WISHLIST".equals(o.optString("state"))||o.optBoolean("wishlist");e.rating=o.optInt("rating");if(o.has("tags")&&o.opt("tags") instanceof JSONArray){JSONArray a=o.optJSONArray("tags");StringBuilder b=new StringBuilder();for(int i=0;i<a.length();i++){if(i>0)b.append(", ");b.append(a.optString(i));}e.tags=b.toString();}else e.tags=o.optString("tags");return e;}}
 }
