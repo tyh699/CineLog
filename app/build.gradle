@@ -3,7 +3,7 @@ plugins { id 'com.android.application' }
 android { namespace 'com.cinelog.app'; compileSdk 35
     buildFeatures { buildConfig true }
     defaultConfig {
-        applicationId 'com.cinelog.app'; minSdk 23; targetSdk 35; versionCode 5; versionName '1.4'
+        applicationId 'com.cinelog.app'; minSdk 23; targetSdk 35; versionCode 6; versionName '1.5'
         // This homework build treats the current PC as the local server.
         // Override with -PAPI_BASE_URL=... only if the LAN address changes.
         buildConfigField 'String', 'API_BASE_URL', '"' + (project.findProperty('API_BASE_URL') ?: 'http://10.29.63.116:8000') + '"'

@@ -4,6 +4,9 @@ import hmac
 import json
 import os
 import secrets
+import random
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Generator
 
@@ -46,6 +49,7 @@ class Entry(Base):
     __tablename__ = "entries"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    catalog_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     title: Mapped[str] = mapped_column(String(160))
     kind: Mapped[str] = mapped_column(String(10))
     state: Mapped[str] = mapped_column(String(12))
@@ -71,6 +75,9 @@ Base.metadata.create_all(engine)
 if "is_admin" not in {column["name"] for column in inspect(engine).get_columns("users")}:
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
+if "catalog_id" not in {column["name"] for column in inspect(engine).get_columns("entries")}:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE entries ADD COLUMN catalog_id VARCHAR(80)"))
 # In this single-computer homework setup, promote the oldest existing account
 # once, so upgrading a database created before admin monitoring stays usable.
 with SessionLocal() as migration_db:
@@ -153,6 +160,7 @@ class CredentialsIn(BaseModel):
 
 
 class EntryIn(BaseModel):
+    catalog_id: str | None = Field(default=None, max_length=80)
     title: str = Field(min_length=1, max_length=160)
     kind: str = Field(pattern=r"^(MOVIE|SERIES)$")
     state: str = Field(pattern=r"^(WATCHED|WISHLIST)$")
@@ -185,8 +193,41 @@ class LibraryIn(BaseModel):
     tags: list[TagIn] = Field(default_factory=list, max_length=300)
 
 
+class CatalogPick(BaseModel):
+    catalog_id: str = Field(min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=160)
+    kind: str = Field(pattern=r"^(MOVIE|SERIES)$")
+    year: str = Field(default="", max_length=4)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+
+CATALOG = [
+    ("movie-inception", "盗梦空间", "MOVIE", "2010", ["科幻", "悬疑"]), ("movie-interstellar", "星际穿越", "MOVIE", "2014", ["科幻", "经典"]),
+    ("movie-mood", "花样年华", "MOVIE", "2000", ["爱情", "经典"]), ("movie-parasite", "寄生虫", "MOVIE", "2019", ["悬疑", "社会"]),
+    ("movie-spirited-away", "千与千寻", "MOVIE", "2001", ["动画", "成长"]), ("movie-arrival", "降临", "MOVIE", "2016", ["科幻", "治愈"]),
+    ("movie-little-forest", "小森林", "MOVIE", "2018", ["治愈", "美食"]), ("movie-past-lives", "过往人生", "MOVIE", "2023", ["爱情", "成长"]),
+    ("movie-la-la-land", "爱乐之城", "MOVIE", "2016", ["爱情", "音乐"]), ("movie-shoplifters", "小偷家族", "MOVIE", "2018", ["家庭", "社会"]),
+    ("series-severance", "人生切割术", "SERIES", "2022", ["科幻", "悬疑"]), ("series-severance-en", "Severance", "SERIES", "2022", ["科幻", "悬疑"]), ("series-long-season", "漫长的季节", "SERIES", "2023", ["悬疑", "国产"]),
+    ("series-bear", "熊家餐馆", "SERIES", "2022", ["美食", "家庭"]), ("series-breaking-bad", "绝命毒师", "SERIES", "2008", ["犯罪", "经典"]),
+    ("series-friends", "老友记", "SERIES", "1994", ["喜剧", "友情"]), ("series-hospital-playlist", "机智医生生活", "SERIES", "2020", ["友情", "治愈"]),
+    ("series-dark", "暗黑", "SERIES", "2017", ["科幻", "悬疑"]), ("series-fleabag", "伦敦生活", "SERIES", "2016", ["喜剧", "成长"]),
+    ("movie-arrival-en", "Arrival", "MOVIE", "2016", ["科幻", "治愈"]), ("movie-past-lives-en", "Past Lives", "MOVIE", "2023", ["爱情", "成长"]),
+]
+
+
+def catalog_items():
+    return [{"catalog_id": cid, "title": title, "kind": kind, "year": year, "tags": tags} for cid, title, kind, year, tags in CATALOG]
+
+
 def entry_out(entry: Entry) -> dict:
-    return {"id": entry.id, "title": entry.title, "kind": entry.kind, "state": entry.state, "rating": entry.rating, "review": entry.review, "watched_date": entry.watched_date, "tags": json.loads(entry.tags), "created_at": entry.created_at, "updated_at": entry.updated_at}
+    return {"id": entry.id, "catalog_id": entry.catalog_id, "title": entry.title, "kind": entry.kind, "state": entry.state, "rating": entry.rating, "review": entry.review, "watched_date": entry.watched_date, "tags": json.loads(entry.tags), "created_at": entry.created_at, "updated_at": entry.updated_at}
+
+
+def canonical_entry(data: EntryIn) -> tuple[str, str, list[str], str]:
+    match = next((item for item in catalog_items() if (data.catalog_id and item["catalog_id"] == data.catalog_id and item["kind"] == data.kind) or (not data.catalog_id and item["title"].casefold() == data.title.strip().casefold() and item["kind"] == data.kind)), None)
+    if match is None:
+        raise HTTPException(422, "Please choose a title from catalog search")
+    return match["catalog_id"], match["title"], match["tags"], match["year"]
 
 
 @app.get("/health")
@@ -204,13 +245,30 @@ def stats(user: User = Depends(current_user), db: Session = Depends(db_session))
 
 @app.get("/api/recommendations")
 def recommendations(user: User = Depends(current_user), db: Session = Depends(db_session)):
-    """Small, explainable local recommendation feed: unseen items sharing tags with favourites."""
+    """Personalized local catalog recommendations with a user-specific tie-breaker."""
     items = db.scalars(select(Entry).where(Entry.owner_id == user.id)).all()
     watched = [e for e in items if e.state == "WATCHED"]
     wishlist = [e for e in items if e.state == "WISHLIST"]
     liked = {tag for e in watched if (e.rating or 0) >= 4 for tag in json.loads(e.tags)}
-    ranked = sorted(wishlist, key=lambda e: len(liked.intersection(json.loads(e.tags))), reverse=True)
-    return [{**entry_out(e), "reason": "与你喜欢的标签相似" if liked.intersection(json.loads(e.tags)) else "来自你的想看清单"} for e in ranked[:12]]
+    excluded = {e.title.casefold() for e in items}
+    seed = sum(ord(ch) for ch in str(user.id)) + len(items) * 31
+    rng = random.Random(seed)
+    candidates = [item for item in catalog_items() if item["title"].casefold() not in excluded]
+    rng.shuffle(candidates)
+    candidates.sort(key=lambda item: len(liked.intersection(item["tags"])), reverse=True)
+    if len(candidates) > 1:
+        offset = user.id % min(len(candidates), 5)
+        candidates = candidates[offset:] + candidates[:offset]
+    return [{**item, "reason": "与你的高分标签相似" if liked.intersection(item["tags"]) else "根据你的片单随机发现"} for item in candidates[:12]]
+
+
+@app.get("/api/catalog/search")
+def catalog_search(q: str = "", kind: str = "MOVIE", user: User = Depends(current_user)):
+    """Return selectable canonical titles; arbitrary user-entered names are never accepted by create/update."""
+    needle = q.strip().casefold()
+    if len(needle) < 2 or kind not in {"MOVIE", "SERIES"}:
+        return []
+    return [item for item in catalog_items() if item["kind"] == kind and needle in item["title"].casefold()][:8]
 
 
 @app.post("/api/auth/register", status_code=201)
@@ -282,7 +340,19 @@ def list_entries(kind: str | None = None, state: str | None = None, q: str | Non
 @app.put("/api/library")
 def replace_library(data: LibraryIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
     """Atomically save the current user's complete library from the single-device UI."""
-    entries = [Entry(owner_id=user.id, title=x.title.strip(), kind=x.kind, state=x.state, rating=x.rating if x.state == "WATCHED" else None, review=x.review if x.state == "WATCHED" else "", watched_date=x.watched_date if x.state == "WATCHED" else None, tags=json.dumps(x.tags, ensure_ascii=False)) for x in data.entries]
+    old_titles = {e.title.casefold(): e.catalog_id for e in db.scalars(select(Entry).where(Entry.owner_id == user.id)).all()}
+    entries = []
+    for x in data.entries:
+        title, tags = x.title.strip(), x.tags
+        if x.catalog_id:
+            x.catalog_id, title, catalog_tags, _ = canonical_entry(x); tags = list(dict.fromkeys(tags + catalog_tags))
+        elif title.casefold() not in old_titles:
+            try:
+                probe = EntryIn(title=title, kind=x.kind, state=x.state, rating=x.rating, review=x.review, watched_date=x.watched_date, tags=x.tags)
+                x.catalog_id, title, catalog_tags, _ = canonical_entry(probe); tags = list(dict.fromkeys(tags + catalog_tags))
+            except HTTPException:
+                raise HTTPException(422, f"'{title}' is not a catalog item; search and select a title first")
+        entries.append(Entry(owner_id=user.id, catalog_id=x.catalog_id or old_titles.get(title.casefold()), title=title, kind=x.kind, state=x.state, rating=x.rating if x.state == "WATCHED" else None, review=x.review if x.state == "WATCHED" else "", watched_date=x.watched_date if x.state == "WATCHED" else None, tags=json.dumps(tags, ensure_ascii=False)))
     tags = [Tag(owner_id=user.id, name=x.name.strip(), for_movies=x.for_movies, for_series=x.for_series) for x in data.tags]
     if any(not t.for_movies and not t.for_series for t in data.tags):
         raise HTTPException(422, "Tag must apply to movies or series")
@@ -298,7 +368,9 @@ def replace_library(data: LibraryIn, user: User = Depends(current_user), db: Ses
 
 @app.post("/api/entries", status_code=201)
 def create_entry(data: EntryIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
-    entry = Entry(owner_id=user.id, title=data.title.strip(), kind=data.kind, state=data.state, rating=data.rating if data.state == "WATCHED" else None, review=data.review if data.state == "WATCHED" else "", watched_date=data.watched_date if data.state == "WATCHED" else None, tags=json.dumps(data.tags, ensure_ascii=False))
+    catalog_id, canonical_title, catalog_tags, _ = canonical_entry(data)
+    data.title = canonical_title; data.tags = list(dict.fromkeys(data.tags + catalog_tags))
+    entry = Entry(owner_id=user.id, catalog_id=catalog_id, title=data.title.strip(), kind=data.kind, state=data.state, rating=data.rating if data.state == "WATCHED" else None, review=data.review if data.state == "WATCHED" else "", watched_date=data.watched_date if data.state == "WATCHED" else None, tags=json.dumps(data.tags, ensure_ascii=False))
     db.add(entry); db.commit(); db.refresh(entry)
     return entry_out(entry)
 
@@ -307,7 +379,9 @@ def create_entry(data: EntryIn, user: User = Depends(current_user), db: Session 
 def update_entry(entry_id: int, data: EntryIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
     entry = db.scalar(select(Entry).where(Entry.id == entry_id, Entry.owner_id == user.id))
     if entry is None: raise HTTPException(404, "Entry not found")
-    entry.title=data.title.strip(); entry.kind=data.kind; entry.state=data.state; entry.rating=data.rating if data.state == "WATCHED" else None; entry.review=data.review if data.state == "WATCHED" else ""; entry.watched_date=data.watched_date if data.state == "WATCHED" else None; entry.tags=json.dumps(data.tags, ensure_ascii=False)
+    if data.catalog_id or data.title.strip().casefold() != entry.title.casefold():
+        data.catalog_id, canonical_title, catalog_tags, _ = canonical_entry(data); data.title = canonical_title; data.tags = list(dict.fromkeys(data.tags + catalog_tags))
+    entry.catalog_id=data.catalog_id or entry.catalog_id; entry.title=data.title.strip(); entry.kind=data.kind; entry.state=data.state; entry.rating=data.rating if data.state == "WATCHED" else None; entry.review=data.review if data.state == "WATCHED" else ""; entry.watched_date=data.watched_date if data.state == "WATCHED" else None; entry.tags=json.dumps(data.tags, ensure_ascii=False)
     db.commit(); db.refresh(entry)
     return entry_out(entry)
 

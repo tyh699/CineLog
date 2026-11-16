@@ -22,11 +22,13 @@ def test_auth_and_user_scoped_data():
         assert client.get("/api/admin/overview", headers=alice).status_code == 200
 
         created = client.post("/api/entries", headers=alice, json={
-            "title": "Arrival", "kind": "MOVIE", "state": "WATCHED", "rating": 5,
+            "catalog_id": "movie-arrival-en", "title": "Arrival", "kind": "MOVIE", "state": "WATCHED", "rating": 5,
             "review": "A thoughtful science-fiction film.", "watched_date": "2026-11-16", "tags": ["Sci-fi"]
         })
         assert created.status_code == 201
         assert created.json()["title"] == "Arrival"
+        invalid_title = client.post("/api/entries", headers=alice, json={"title": "1", "kind": "MOVIE", "state": "WATCHED"})
+        assert invalid_title.status_code == 422
 
         listed = client.get("/api/entries?kind=MOVIE&state=WATCHED&q=sci-fi", headers=alice)
         assert len(listed.json()) == 1
@@ -57,7 +59,13 @@ def test_auth_and_user_scoped_data():
         assert sync.status_code == 200
         assert sync.json() == {"entries": 2, "tags": 1}
         assert client.get("/api/stats", headers=alice).json()["watched"] == 1
-        assert client.get("/api/recommendations", headers=alice).json()[0]["title"] == "Severance"
+        recs = client.get("/api/recommendations", headers=alice).json()
+        assert recs and all(item["catalog_id"] for item in recs)
+        assert all(item["title"] not in {"Past Lives", "Severance"} for item in recs)
+        bob_recs = client.get("/api/recommendations", headers=bob_headers).json()
+        assert recs[0]["catalog_id"] != bob_recs[0]["catalog_id"]
+        assert client.get("/api/catalog/search?q=星际&kind=MOVIE", headers=alice).json()[0]["title"] == "星际穿越"
+        assert client.get("/api/catalog/search?q=1&kind=MOVIE", headers=alice).json() == []
         assert client.get("/", follow_redirects=True).status_code == 200
         assert client.get("/admin").status_code == 200
 

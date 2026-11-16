@@ -23,6 +23,7 @@ python -m uvicorn app.main:app --reload
 - SQLite 默认存储，也保留 Docker + PostgreSQL 配置；
 - 作品和标签完整 CRUD，按类型、状态、标题/短评/标签搜索；
 - `/api/stats` 年度统计基础接口和 `/api/recommendations` 本地标签推荐接口；
+- `/api/catalog/search` 本地标准作品目录搜索；新增/编辑作品必须选择目录结果，不能保存任意的 `1` 等文本；
 - `/api/admin/overview` 管理员监测接口与 `/admin` 管理后台；
 - 响应式网页端与 Android 客户端工程，共用同一套数据模型；
 - 后端自动托管网页，无需额外前端服务器。
@@ -42,4 +43,4 @@ python -m pytest backend\tests -q
 .\gradlew.bat clean assembleDebug -PAPI_BASE_URL=http://192.168.1.100:8000
 ```
 
-把示例地址换成电脑实际局域网 IP，并允许 Windows 防火墙放行 8000 端口。当前 Android 版本为 `1.4`，APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，仓库外的同步交付副本位于 `F:\桌面\lab2\CineLog-debug.apk`。`docker-compose.yml` 提供可选的 PostgreSQL 本地部署方式。
+把示例地址换成电脑实际局域网 IP，并允许 Windows 防火墙放行 8000 端口。当前 Android 版本为 `1.5`，APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，仓库外的同步交付副本位于 `F:\桌面\lab2\CineLog-debug.apk`。`docker-compose.yml` 提供可选的 PostgreSQL 本地部署方式。
