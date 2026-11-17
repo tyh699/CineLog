@@ -219,6 +219,7 @@ CATALOG = [
     ("movie-arrival-en", "Arrival", "MOVIE", "2016", ["科幻", "治愈"]), ("movie-past-lives-en", "Past Lives", "MOVIE", "2023", ["爱情", "成长"]),
 ]
 TMDB_CACHE: dict[str, dict] = {}
+TMDB_GENRES = {28:"动作",12:"冒险",16:"动画",35:"喜剧",80:"犯罪",99:"纪录片",18:"剧情",10751:"家庭",14:"奇幻",36:"历史",27:"恐怖",10402:"音乐",9648:"悬疑",10749:"爱情",878:"科幻",53:"惊悚",10752:"战争",37:"西部",10759:"动作",10762:"儿童",10763:"新闻",10764:"真人秀",10765:"科幻",10766:"肥皂剧",10767:"脱口秀",10768:"战争"}
 
 
 def catalog_items():
@@ -242,7 +243,8 @@ def tmdb_search(query: str, kind: str) -> list[dict]:
         date = item.get("release_date") if kind == "MOVIE" else item.get("first_air_date")
         if not title:
             continue
-        canonical = {"catalog_id": f"tmdb-{kind.lower()}-{item.get('id')}", "title": title, "kind": kind, "year": (date or "")[:4], "tags": [], "source": "TMDB", "poster_path": item.get("poster_path") or ""}
+        tags = [TMDB_GENRES[g] for g in item.get("genre_ids", []) if g in TMDB_GENRES]
+        canonical = {"catalog_id": f"tmdb-{kind.lower()}-{item.get('id')}", "title": title, "kind": kind, "year": (date or "")[:4], "tags": list(dict.fromkeys(tags)), "source": "TMDB", "poster_path": item.get("poster_path") or ""}
         TMDB_CACHE[canonical["catalog_id"]] = canonical
         results.append(canonical)
     return results
@@ -274,21 +276,26 @@ def stats(user: User = Depends(current_user), db: Session = Depends(db_session))
 
 @app.get("/api/recommendations")
 def recommendations(user: User = Depends(current_user), db: Session = Depends(db_session)):
-    """Personalized local catalog recommendations with a user-specific tie-breaker."""
+    """Rank unseen local titles using tag, type, rating and light exploration signals."""
     items = db.scalars(select(Entry).where(Entry.owner_id == user.id)).all()
     watched = [e for e in items if e.state == "WATCHED"]
     wishlist = [e for e in items if e.state == "WISHLIST"]
     liked = {tag for e in watched if (e.rating or 0) >= 4 for tag in json.loads(e.tags)}
+    type_scores = {kind: sum(1 for e in watched if e.kind == kind and (e.rating or 0) >= 4) for kind in {"MOVIE", "SERIES"}}
     excluded = {e.title.casefold() for e in items}
     seed = sum(ord(ch) for ch in str(user.id)) + len(items) * 31
     rng = random.Random(seed)
     candidates = [item for item in catalog_items() if item["title"].casefold() not in excluded]
-    rng.shuffle(candidates)
-    candidates.sort(key=lambda item: len(liked.intersection(item["tags"])), reverse=True)
-    if len(candidates) > 1:
-        offset = user.id % min(len(candidates), 5)
-        candidates = candidates[offset:] + candidates[:offset]
-    return [{**item, "reason": "与你的高分标签相似" if liked.intersection(item["tags"]) else "根据你的片单随机发现"} for item in candidates[:12]]
+    rng = random.Random(sum(ord(ch) for ch in str(user.id)) + len(items) * 31)
+    ranked = []
+    for item in candidates:
+        tag_hits = len(liked.intersection(item["tags"]))
+        type_bonus = type_scores.get(item["kind"], 0)
+        score = tag_hits * 5 + type_bonus * 2 + rng.random()
+        reason = "与你的高分标签相似" if tag_hits else ("符合你常看的类型" if type_bonus else "为你探索新作品")
+        ranked.append((score, {**item, "reason": reason, "match_score": round(score, 2)}))
+    ranked.sort(key=lambda row: row[0], reverse=True)
+    return [item for _, item in ranked[:12]]
 
 
 @app.get("/api/catalog/search")
