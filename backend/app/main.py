@@ -256,6 +256,12 @@ def entry_out(entry: Entry) -> dict:
 
 def canonical_entry(data: EntryIn) -> tuple[str, str, list[str], str]:
     match = next((item for item in catalog_items() + list(TMDB_CACHE.values()) if (data.catalog_id and item["catalog_id"] == data.catalog_id and item["kind"] == data.kind) or (not data.catalog_id and item["title"].casefold() == data.title.strip().casefold() and item["kind"] == data.kind)), None)
+    # TMDB search results are cached in memory for discovery, but a valid
+    # selected TMDB id must remain usable after the API process restarts.
+    if match is None and data.catalog_id and data.catalog_id.startswith("tmdb-"):
+        prefix = "tmdb-movie-" if data.kind == "MOVIE" else "tmdb-series-"
+        if data.catalog_id.startswith(prefix) and data.title.strip():
+            return data.catalog_id, data.title.strip(), [], ""
     if match is None:
         raise HTTPException(422, "Please choose a title from catalog search")
     return match["catalog_id"], match["title"], match["tags"], match["year"]
