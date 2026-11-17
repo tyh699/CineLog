@@ -9,6 +9,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Generator
+from dotenv import load_dotenv
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
@@ -19,6 +20,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, select, func, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")))
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./cinelog.db")
 TMDB_API_READ_TOKEN = os.getenv("TMDB_API_READ_TOKEN", "").strip()

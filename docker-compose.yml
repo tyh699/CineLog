@@ -23,6 +23,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       TOKEN_HOURS: ${TOKEN_HOURS:-168}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      TMDB_API_READ_TOKEN: ${TMDB_API_READ_TOKEN:-}
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
